@@ -68,7 +68,8 @@ class LightweightFeedbackCoach:
         frame_resized = cv2.resize(frame, (input_size, input_size))
         frame_rgb = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
         frame_tensor = torch.from_numpy(frame_rgb).float() / 255.0
-        frame_tensor = frame_tensor.permute(2, 0, 1).unsqueeze(0).to(self.model.device)
+        # Add time dimension: [height, width, channels] -> [channels, time=1, height, width] -> [batch=1, channels, time=1, height, width]
+        frame_tensor = frame_tensor.permute(2, 0, 1).unsqueeze(0).unsqueeze(2).to(self.model.device)
 
         with torch.no_grad():
             features = self.model.model.vision(frame_tensor)
