@@ -224,16 +224,28 @@ class LightweightFeedbackCoach:
                     encoded_video, output_ids, vision_xattn_mask
                 )
                 print(f"DEBUG: Adapter succeeded")
+                print(f"DEBUG: multi_model_embedding keys: {multi_model_embedding.keys()}")
+                if "0" in multi_model_embedding:
+                    print(f"DEBUG: multi_model_embedding['0'] keys: {multi_model_embedding['0'].keys()}")
+                    if "comb" in multi_model_embedding["0"]:
+                        print(f"DEBUG: multi_model_embedding['0']['comb'] shape: {multi_model_embedding['0']['comb'].shape}")
             except Exception as e:
                 print(f"DEBUG: Adapter failed with error: {e}")
                 raise
 
-            lang_out = self.model.model.lang(
-                inputs_embeds=multi_model_embedding,
-                attention_mask=torch.ones_like(output_ids).to(self.model.device),
-                use_cache=True,
-                past_key_values=past_key_values,
-            )
+            try:
+                lang_out = self.model.model.lang(
+                    inputs_embeds=multi_model_embedding,
+                    attention_mask=torch.ones_like(output_ids).to(self.model.device),
+                    use_cache=True,
+                    past_key_values=past_key_values,
+                )
+                print(f"DEBUG: Lang model succeeded")
+            except Exception as e:
+                print(f"DEBUG: Lang model failed with error: {e}")
+                import traceback
+                traceback.print_exc()
+                raise
 
             past_key_values = lang_out["past_key_values"]
 
