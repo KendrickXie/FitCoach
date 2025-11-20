@@ -102,11 +102,8 @@ class LightweightFeedbackCoach:
             else:
                 frames_list = list(self.feature_buffer)
 
-            # Stack frames: each frame is [1, 3, H, W], stack along axis 1 to get [1, num_frames, 3, H, W]
-            frames_batch = np.concatenate(frames_list, axis=1)  # [1, num_frames, 3, H, W]
-
-            # Reshape to [num_frames, 3, H, W] for the 3D CNN (it processes each frame)
-            frames_batch = frames_batch.squeeze(0)  # [num_frames, 3, H, W]
+            # Stack frames: each frame is [1, 3, H, W], concatenate along axis 0 to get [num_frames, 3, H, W]
+            frames_batch = np.concatenate(frames_list, axis=0)  # [num_frames, 3, H, W]
 
             # Extract 3D CNN features from the backbone (not the full net with classifier)
             frames_tensor = torch.from_numpy(frames_batch)
