@@ -102,8 +102,11 @@ class LightweightFeedbackCoach:
             else:
                 frames_list = list(self.feature_buffer)
 
-            # Stack frames into batch: [num_frames, 1, 3, H, W]
-            frames_batch = np.concatenate(frames_list, axis=0)  # [num_frames, 3, H, W]
+            # Stack frames: each frame is [1, 3, H, W], stack along axis 1 to get [1, num_frames, 3, H, W]
+            frames_batch = np.concatenate(frames_list, axis=1)  # [1, num_frames, 3, H, W]
+
+            # Reshape to [num_frames, 3, H, W] for the 3D CNN (it processes each frame)
+            frames_batch = frames_batch.squeeze(0)  # [num_frames, 3, H, W]
 
             # Extract 3D CNN features from the backbone (not the full net with classifier)
             frames_tensor = torch.from_numpy(frames_batch)
@@ -113,8 +116,8 @@ class LightweightFeedbackCoach:
             with torch.no_grad():
                 # Use features (backbone) only, not the full net
                 cnn_features = self.cnn_model.features(frames_tensor)  # [num_frames, 1280, T, H, W]
-                # Apply mean pooling over spatial dimensions
-                cnn_features = cnn_features.mean(dim=-1).mean(dim=-1).mean(dim=-1)  # [num_frames, 1280]
+                # Apply mean pooling over spatial+temporal dimensions (last 3 dims), keep [num_frames, 1280]
+                cnn_features = cnn_features.mean(dim=2).mean(dim=2).mean(dim=2)  # [num_frames, 1280]
 
             # Reshape to [1, num_frames, 1280] for the processor
             cnn_features = cnn_features.unsqueeze(0).to(self.model.device)
