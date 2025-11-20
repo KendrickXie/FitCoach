@@ -256,7 +256,10 @@ class LightweightFeedbackCoach:
                 probs = torch.softmax(scaled_logits, dim=-1)
                 next_token = torch.multinomial(probs, num_samples=1).squeeze()
 
-            output_ids = torch.cat([output_ids, next_token.unsqueeze(0).unsqueeze(0)], dim=1)
+            print(f"DEBUG: next_token shape: {next_token.shape}")
+            # next_token is [batch_size], need to make it [batch_size, 1] to concat with output_ids
+            output_ids = torch.cat([output_ids, next_token.unsqueeze(-1)], dim=1)
+            print(f"DEBUG: output_ids shape after cat: {output_ids.shape}")
 
             if next_token.item() == self.special_tokens_dict[FEEDBACK_END_TOKEN]:
                 output_list = output_ids[0].cpu().tolist()
