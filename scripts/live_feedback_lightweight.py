@@ -112,22 +112,19 @@ class LightweightFeedbackCoach:
 
             with torch.no_grad():
                 # Use features (backbone) only, not the full net
-                cnn_features = self.cnn_model.features(frames_tensor)  # Output shape varies
-                print(f"DEBUG: CNN features raw shape: {cnn_features.shape}")
+                cnn_features = self.cnn_model.features(frames_tensor)
 
                 # Apply global average pooling over spatial dimensions (keep [num_frames, 1280])
                 if len(cnn_features.shape) == 4:  # [num_frames, 1280, H, W]
                     cnn_features = cnn_features.mean(dim=-1).mean(dim=-1)  # [num_frames, 1280]
-                    print(f"DEBUG: After spatial pooling: {cnn_features.shape}")
                 elif len(cnn_features.shape) == 2:  # Already [num_frames, 1280]
-                    print(f"DEBUG: Already 2D, no pooling needed")
+                    pass  # No pooling needed
                 else:
                     raise ValueError(f"Unexpected CNN feature shape: {cnn_features.shape}")
 
             # Average over temporal dimension to get single feature vector per spatial location
             # This matches the single <vision> token in the prompt
             cnn_features = cnn_features.mean(dim=0, keepdim=True)  # [1, 1280]
-            print(f"DEBUG: After temporal pooling: {cnn_features.shape}")
 
             # Move to model device
             cnn_features = cnn_features.to(self.model.device)
@@ -135,14 +132,12 @@ class LightweightFeedbackCoach:
             # Reshape to [B, L, H*W, C] format expected by the model
             # B=1 (batch), L=1 (single time step), H*W=1 (single spatial location), C=1280 (features)
             cnn_features = cnn_features.unsqueeze(0).unsqueeze(2)  # [1, 1, 1, 1280]
-            print(f"DEBUG: Final features shape: {cnn_features.shape}")
 
             # Create features dict as expected by the model
             video_features = {
                 'feats': cnn_features,
                 'spatial_res': [1, 1]  # Single spatial location
             }
-            print(f"DEBUG: About to call adapter with features shape: {video_features['feats'].shape}")
 
             # Clear cache
             if torch.cuda.is_available():
@@ -154,17 +149,11 @@ class LightweightFeedbackCoach:
             vision_xattn_mask = self._get_vision_xattn_mask(input_ids)
             vision_xattn_mask = [2 if tok == 1 else 0 for tok in vision_xattn_mask]
 
-            print(f"DEBUG: input_ids length: {len(input_ids)}")
-            print(f"DEBUG: vision_xattn_mask: {vision_xattn_mask}")
-
             # Generate with lower max length for speed
             max_length = min(self.sampling_kwargs.get("max_feedback_length", 128), 64)
 
             input_ids_tensor = torch.tensor(input_ids).unsqueeze(0).to(self.model.device)
             vision_xattn_mask_tensor = torch.tensor(vision_xattn_mask).unsqueeze(0).to(self.model.device)
-
-            print(f"DEBUG: input_ids_tensor shape: {input_ids_tensor.shape}")
-            print(f"DEBUG: vision_xattn_mask_tensor shape: {vision_xattn_mask_tensor.shape}")
 
             output = self._generate_single_feedback(
                 video_features,
@@ -204,48 +193,23 @@ class LightweightFeedbackCoach:
 
     def _generate_single_feedback(self, encoded_video, input_ids, vision_xattn_mask, max_length=64):
         """Generate feedback with limited length."""
-        print(f"DEBUG _generate: encoded_video type: {type(encoded_video)}")
-        if isinstance(encoded_video, dict):
-            print(f"DEBUG _generate: encoded_video['feats'] shape: {encoded_video['feats'].shape}")
-        print(f"DEBUG _generate: input_ids shape: {input_ids.shape}")
-        print(f"DEBUG _generate: vision_xattn_mask shape: {vision_xattn_mask.shape}")
-
         output_ids = input_ids.clone()
         past_key_values = None
 
         do_sample = self.sampling_kwargs.get("do_sample", False)
         temperature = self.sampling_kwargs.get("temperature", 0.0)
 
-        for iteration in range(max_length):
-            print(f"DEBUG: Generation iteration {iteration}, output_ids shape: {output_ids.shape}")
+        for _ in range(max_length):
+            multi_model_embedding = self.model.model.adapter(
+                encoded_video, output_ids, vision_xattn_mask
+            )
 
-            try:
-                multi_model_embedding = self.model.model.adapter(
-                    encoded_video, output_ids, vision_xattn_mask
-                )
-                print(f"DEBUG: Adapter succeeded")
-                print(f"DEBUG: multi_model_embedding keys: {multi_model_embedding.keys()}")
-                if "0" in multi_model_embedding:
-                    print(f"DEBUG: multi_model_embedding['0'] keys: {multi_model_embedding['0'].keys()}")
-                    if "comb" in multi_model_embedding["0"]:
-                        print(f"DEBUG: multi_model_embedding['0']['comb'] shape: {multi_model_embedding['0']['comb'].shape}")
-            except Exception as e:
-                print(f"DEBUG: Adapter failed with error: {e}")
-                raise
-
-            try:
-                lang_out = self.model.model.lang(
-                    inputs_embeds=multi_model_embedding,
-                    attention_mask=torch.ones_like(output_ids).to(self.model.device),
-                    use_cache=True,
-                    past_key_values=past_key_values,
-                )
-                print(f"DEBUG: Lang model succeeded")
-            except Exception as e:
-                print(f"DEBUG: Lang model failed with error: {e}")
-                import traceback
-                traceback.print_exc()
-                raise
+            lang_out = self.model.model.lang(
+                inputs_embeds=multi_model_embedding,
+                attention_mask=torch.ones_like(output_ids).to(self.model.device),
+                use_cache=True,
+                past_key_values=past_key_values,
+            )
 
             past_key_values = lang_out["past_key_values"]
 
@@ -256,10 +220,8 @@ class LightweightFeedbackCoach:
                 probs = torch.softmax(scaled_logits, dim=-1)
                 next_token = torch.multinomial(probs, num_samples=1).squeeze()
 
-            print(f"DEBUG: next_token shape: {next_token.shape}")
             # next_token is [batch_size], need to make it [batch_size, 1] to concat with output_ids
             output_ids = torch.cat([output_ids, next_token.unsqueeze(-1)], dim=1)
-            print(f"DEBUG: output_ids shape after cat: {output_ids.shape}")
 
             if next_token.item() == self.special_tokens_dict[FEEDBACK_END_TOKEN]:
                 output_list = output_ids[0].cpu().tolist()
@@ -360,7 +322,7 @@ class LightweightFeedbackCoach:
                         feedback_timestamp = timestamp
                         last_feedback_time = current_time
                         self.feedback_history.append((timestamp, feedback))
-                        print(f"💬 Coach: {feedback}")
+                        print(f"Coach: {feedback}")
 
                 # Display if not headless
                 if not headless:
