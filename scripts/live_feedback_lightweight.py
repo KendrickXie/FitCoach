@@ -139,6 +139,9 @@ class LightweightFeedbackCoach:
                 'spatial_res': [1, 1]  # Single spatial location
             }
 
+            # Delete intermediate tensors to free memory
+            del frames_tensor
+
             # Clear cache
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
@@ -162,6 +165,9 @@ class LightweightFeedbackCoach:
                 max_length=max_length
             )
 
+            # Clean up tensors
+            del video_features, input_ids_tensor, vision_xattn_mask_tensor
+
             # Clear cache
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
@@ -173,10 +179,17 @@ class LightweightFeedbackCoach:
         except RuntimeError as e:
             if "out of memory" in str(e):
                 print("GPU out of memory! Clearing cache and reducing buffer...")
-                torch.cuda.empty_cache()
-                # Reduce buffer size
-                while len(self.feature_buffer) > 50:
+                # Clear cache first
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                # Aggressively reduce buffer size
+                while len(self.feature_buffer) > 20:
                     self.feature_buffer.popleft()
+                # Try to clear any lingering tensors
+                import gc
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
             else:
                 print(f"Error generating feedback: {e}")
 
@@ -314,7 +327,7 @@ class LightweightFeedbackCoach:
                     feedback, timestamp = self.generate_feedback(
                         system_prompt,
                         use_recent_only=True,
-                        window_size=40  # Use only last 40 features (~20 seconds)
+                        window_size=30  # Use only last 30 features (~15 seconds, reduced for memory)
                     )
 
                     if feedback:
