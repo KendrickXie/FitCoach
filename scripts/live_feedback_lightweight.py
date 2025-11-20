@@ -112,9 +112,14 @@ class LightweightFeedbackCoach:
 
             with torch.no_grad():
                 # Use features (backbone) only, not the full net
-                cnn_features = self.cnn_model.features(frames_tensor)  # [num_frames, 1280, T, H, W]
-                # Apply mean pooling over spatial+temporal dimensions (last 3 dims), keep [num_frames, 1280]
-                cnn_features = cnn_features.mean(dim=2).mean(dim=2).mean(dim=2)  # [num_frames, 1280]
+                cnn_features = self.cnn_model.features(frames_tensor)  # Output shape varies
+                # Apply global average pooling over spatial dimensions (keep [num_frames, 1280])
+                if len(cnn_features.shape) == 4:  # [num_frames, 1280, H, W]
+                    cnn_features = cnn_features.mean(dim=-1).mean(dim=-1)  # [num_frames, 1280]
+                elif len(cnn_features.shape) == 2:  # Already [num_frames, 1280]
+                    pass  # No pooling needed
+                else:
+                    raise ValueError(f"Unexpected CNN feature shape: {cnn_features.shape}")
 
             # Reshape to [1, num_frames, 1280] for the processor
             cnn_features = cnn_features.unsqueeze(0).to(self.model.device)
