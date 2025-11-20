@@ -55,31 +55,21 @@ class LightweightFeedbackCoach:
         if hasattr(torch.cuda, 'empty_cache'):
             torch.cuda.empty_cache()
 
-    def extract_features_from_frame(self, frame, input_size=224):
-        """Extract features with memory optimization.
+    def preprocess_frame(self, frame, input_size=224):
+        """Preprocess a single frame (don't extract features yet - batch them instead).
 
         Args:
             frame: OpenCV frame
             input_size: Model input size (default 224, can reduce to 160 for speed)
 
         Returns:
-            Extracted features
+            Preprocessed frame tensor [C, H, W]
         """
         frame_resized = cv2.resize(frame, (input_size, input_size))
         frame_rgb = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
         frame_tensor = torch.from_numpy(frame_rgb).float() / 255.0
-        # Vision model expects [B, L, C, H, W] where L is temporal/sequence dimension
-        # [H, W, C] -> [C, H, W] -> [1, C, H, W] -> [1, 1, C, H, W]
-        frame_tensor = frame_tensor.permute(2, 0, 1).unsqueeze(0).unsqueeze(0).to(self.model.device)
-
-        with torch.no_grad():
-            features = self.model.model.vision(frame_tensor)
-
-        # Clear cache to prevent memory buildup
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-        return features
+        # Return [C, H, W] - don't add batch/time dims yet
+        return frame_tensor.permute(2, 0, 1)
 
     def generate_feedback(self, system_prompt, use_recent_only=True, window_size=60):
         """Generate feedback with memory optimization.
@@ -96,20 +86,22 @@ class LightweightFeedbackCoach:
             return None, None
 
         try:
-            # Use only recent features if specified
+            # Use only recent frames if specified
             if use_recent_only and len(self.feature_buffer) > window_size:
-                features_list = list(self.feature_buffer)[-window_size:]
+                frames_list = list(self.feature_buffer)[-window_size:]
             else:
-                features_list = list(self.feature_buffer)
+                frames_list = list(self.feature_buffer)
 
-            # Stack features
-            if isinstance(features_list[0], dict):
-                video_features = {
-                    'feats': torch.cat([f['feats'] for f in features_list], dim=1),
-                    'spatial_res': features_list[0].get('spatial_res', None)
-                }
-            else:
-                video_features = torch.cat(features_list, dim=1)
+            # Batch-encode all frames at once
+            # Stack: [L, C, H, W] -> [1, L, C, H, W]
+            video_tensor = torch.stack(frames_list).unsqueeze(0).to(self.model.device)
+
+            with torch.no_grad():
+                video_features = self.model.model.vision(video_tensor)
+
+            # Clear cache
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
             # Prepare input
             input_prompt = system_prompt + VISION_TOKEN
@@ -263,14 +255,14 @@ class LightweightFeedbackCoach:
                 current_time = time.time()
                 frame_count += 1
 
-                # Extract features at lower rate
+                # Preprocess frames at lower rate (don't extract features yet)
                 if current_time - last_feature_time >= feature_interval:
                     try:
-                        features = self.extract_features_from_frame(frame, input_size=160)
-                        self.feature_buffer.append(features)
+                        preprocessed_frame = self.preprocess_frame(frame, input_size=160)
+                        self.feature_buffer.append(preprocessed_frame)
                         last_feature_time = current_time
                     except Exception as e:
-                        print(f"Feature extraction error: {e}")
+                        print(f"Frame preprocessing error: {e}")
 
                 # Generate feedback less frequently
                 if current_time - last_feedback_time >= feedback_interval:
