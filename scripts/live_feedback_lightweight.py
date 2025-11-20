@@ -14,6 +14,7 @@ import yaml
 
 from src.constants import FEEDBACK_BEGIN_TOKEN, FEEDBACK_END_TOKEN, VISION_TOKEN
 from src.model_helpers import make_model
+from src.vision_modules.vision_model import Hypermodel
 
 
 class LightweightFeedbackCoach:
@@ -27,18 +28,31 @@ class LightweightFeedbackCoach:
     - Batch size of 1
     """
 
-    def __init__(self, model, config, max_buffer_size=200):
+    def __init__(self, model, config, cnn_weights_path, max_buffer_size=200):
         """Initialize lightweight coach.
 
         Args:
             model: Stream-VLM model
             config: Configuration dictionary
+            cnn_weights_path: Path to 3D CNN (EfficientNet) weights
             max_buffer_size: Maximum features to buffer (default 200 = 100 seconds at 2fps)
         """
         self.model = model
         self.config = config
         self.sampling_kwargs = config["evaluator"]["sampling_kwargs"]
         self.feats_frequency = self.sampling_kwargs.get("feats_frequency", 2)  # Lower default
+
+        # Load 3D CNN for feature extraction
+        print("Loading 3D CNN for feature extraction...")
+        self.cnn_model = Hypermodel(
+            num_global_classes=23,  # Number of exercises in QEVD
+            num_frames_required=1,
+            path_weights=cnn_weights_path,
+            gpus=[0] if torch.cuda.is_available() else None,
+            half_precision=False
+        )
+        self.cnn_model.initialize()
+        print("3D CNN loaded successfully!")
 
         # Smaller buffer for memory efficiency
         self.feature_buffer = deque(maxlen=max_buffer_size)
@@ -55,21 +69,17 @@ class LightweightFeedbackCoach:
         if hasattr(torch.cuda, 'empty_cache'):
             torch.cuda.empty_cache()
 
-    def preprocess_frame(self, frame, input_size=224):
-        """Preprocess a single frame (don't extract features yet - batch them instead).
+    def preprocess_frame(self, frame):
+        """Preprocess a single frame using the 3D CNN's transform pipeline.
 
         Args:
-            frame: OpenCV frame
-            input_size: Model input size (default 224, can reduce to 160 for speed)
+            frame: OpenCV BGR frame
 
         Returns:
-            Preprocessed frame tensor [C, H, W]
+            Preprocessed frame numpy array
         """
-        frame_resized = cv2.resize(frame, (input_size, input_size))
-        frame_rgb = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
-        frame_tensor = torch.from_numpy(frame_rgb).float() / 255.0
-        # Return [C, H, W] - don't add batch/time dims yet
-        return frame_tensor.permute(2, 0, 1)
+        # Use the 3D CNN's built-in preprocessing
+        return self.cnn_model.transforms(frame)
 
     def generate_feedback(self, system_prompt, use_recent_only=True, window_size=60):
         """Generate feedback with memory optimization.
@@ -92,12 +102,27 @@ class LightweightFeedbackCoach:
             else:
                 frames_list = list(self.feature_buffer)
 
-            # Batch-encode all frames at once
-            # Stack: [L, C, H, W] -> [1, L, C, H, W]
-            video_tensor = torch.stack(frames_list).unsqueeze(0).to(self.model.device)
+            # Stack frames into batch: [num_frames, 1, 3, H, W]
+            frames_batch = np.concatenate(frames_list, axis=0)  # [num_frames, 3, H, W]
 
+            # Extract 3D CNN features
             with torch.no_grad():
-                video_features = self.model.model.vision(video_tensor)
+                cnn_features = self.cnn_model.forward(torch.from_numpy(frames_batch))
+
+            # cnn_features shape: [num_frames, 1280] - convert to numpy
+            # Reshape to [1, num_frames, 1280] for the processor
+            cnn_features = torch.from_numpy(cnn_features).unsqueeze(0).to(self.model.device)
+
+            # Expand dims to match expected format [B, L, 1, C] -> [B, L, H*W, C]
+            # The processor expects [B, L, H*W, C] where H*W is spatial resolution
+            # For features, we just use [B, L, 1, C]
+            cnn_features = cnn_features.unsqueeze(2)  # [1, num_frames, 1, 1280]
+
+            # Create features dict as expected by the model
+            video_features = {
+                'feats': cnn_features,
+                'spatial_res': [1, 1]  # Single spatial location per frame
+            }
 
             # Clear cache
             if torch.cuda.is_available():
@@ -258,7 +283,7 @@ class LightweightFeedbackCoach:
                 # Preprocess frames at lower rate (don't extract features yet)
                 if current_time - last_feature_time >= feature_interval:
                     try:
-                        preprocessed_frame = self.preprocess_frame(frame, input_size=160)
+                        preprocessed_frame = self.preprocess_frame(frame)
                         self.feature_buffer.append(preprocessed_frame)
                         last_feature_time = current_time
                     except Exception as e:
@@ -355,7 +380,10 @@ def main():
 
     print("Model loaded successfully!")
 
-    coach = LightweightFeedbackCoach(model, config, max_buffer_size=args.buffer_size)
+    # Get CNN weights path from config or use default
+    cnn_weights_path = "./ckpts_efficientnet/efficientnet_3d_cnn_weights/ckpts/efficientnet_3d_cnn.pth.tar"
+
+    coach = LightweightFeedbackCoach(model, config, cnn_weights_path, max_buffer_size=args.buffer_size)
     coach.run(
         camera_id=args.camera,
         exercise_type=args.exercise,
