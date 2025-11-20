@@ -380,8 +380,30 @@ def main():
 
     print("Model loaded successfully!")
 
-    # Get CNN weights path from config or use default
-    cnn_weights_path = "./ckpts_efficientnet/efficientnet_3d_cnn_weights/ckpts/efficientnet_3d_cnn.pth.tar"
+    # Get CNN weights path - try common locations
+    import sys
+    possible_paths = [
+        "./ckpts_efficientnet/fitness_ally_hypermodel/efficientnet4Lite_1.8.3.checkpoint",
+        "./ckpts_efficientnet/efficientnet4Lite_1.8.3.checkpoint",
+        "./ckpts_efficientnet/efficientnet_3d_cnn.pth.tar",
+        "./ckpts_efficientnet/ckpts/efficientnet_3d_cnn.pth.tar",
+    ]
+
+    cnn_weights_path = None
+    for path in possible_paths:
+        if Path(path).exists():
+            cnn_weights_path = path
+            print(f"Found CNN weights at: {path}")
+            break
+
+    if cnn_weights_path is None:
+        print("ERROR: Could not find 3D CNN weights!")
+        print("Searched in:")
+        for p in possible_paths:
+            print(f"  - {p}")
+        print("\nPlease check the extracted files:")
+        print("  !ls -la ckpts_efficientnet/")
+        sys.exit(1)
 
     coach = LightweightFeedbackCoach(model, config, cnn_weights_path, max_buffer_size=args.buffer_size)
     coach.run(
