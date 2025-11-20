@@ -243,6 +243,12 @@ class LightweightFeedbackCoach:
         feedback_timestamp = time.time()
         frame_count = 0
 
+        # Get video FPS for proper timing when processing video files
+        video_fps = cap.get(cv2.CAP_PROP_FPS) if video_file else 30.0
+        if video_fps == 0:
+            video_fps = 30.0  # Default if not available
+        frame_delay = 1.0 / video_fps if video_file else 0  # Only delay for video files
+
         try:
             while True:
                 ret, frame = cap.read()
@@ -306,6 +312,10 @@ class LightweightFeedbackCoach:
                         self.feature_buffer.clear()
                         self.feedback_history.clear()
                         print("\n[RESET] Session cleared")
+                else:
+                    # Headless mode - add small delay to match video FPS when processing files
+                    if frame_delay > 0:
+                        time.sleep(frame_delay)
 
         finally:
             cap.release()
