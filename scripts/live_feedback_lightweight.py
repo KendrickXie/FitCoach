@@ -125,12 +125,12 @@ class LightweightFeedbackCoach:
             # This matches the single <vision> token in the prompt
             cnn_features = cnn_features.mean(dim=0, keepdim=True)  # [1, 1280]
 
-            # Reshape to [1, 1, 1280] for the processor (batch, temporal, features)
-            cnn_features = cnn_features.unsqueeze(0).to(self.model.device)  # [1, 1, 1280]
+            # Move to model device
+            cnn_features = cnn_features.to(self.model.device)
 
-            # Expand dims to match expected format [B, L, H*W, C]
-            # For aggregated features, we use [B, 1, 1, C] (1 time step, 1 spatial location)
-            cnn_features = cnn_features.unsqueeze(2)  # [1, 1, 1, 1280]
+            # Reshape to [B, L, H*W, C] format expected by the model
+            # B=1 (batch), L=1 (single time step), H*W=1 (single spatial location), C=1280 (features)
+            cnn_features = cnn_features.unsqueeze(0).unsqueeze(2)  # [1, 1, 1, 1280]
 
             # Create features dict as expected by the model
             video_features = {
