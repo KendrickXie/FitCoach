@@ -31,6 +31,6 @@ evaluator:
     sampling_kwargs:
         do_sample: False
         temperature: 0.
-        max_feedback_length: 64  # Shorter for faster generation
+        max_feedback_length: 48  # Reduced from 64 for better memory efficiency
         feats_frequency: 2  # Lower rate for less GPU usage (2 fps instead of 4)
-        feedback_interval: 10.0  # Less frequent feedback (every 10 seconds)
+        feedback_interval: 15.0  # Increased from 10 to 15 seconds for better memory management

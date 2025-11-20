@@ -327,7 +327,7 @@ class LightweightFeedbackCoach:
                     feedback, timestamp = self.generate_feedback(
                         system_prompt,
                         use_recent_only=True,
-                        window_size=30  # Use only last 30 features (~15 seconds, reduced for memory)
+                        window_size=20  # Use only last 20 features (~10 seconds, optimized for T4 GPU memory)
                     )
 
                     if feedback:
