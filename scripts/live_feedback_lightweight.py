@@ -121,18 +121,21 @@ class LightweightFeedbackCoach:
                 else:
                     raise ValueError(f"Unexpected CNN feature shape: {cnn_features.shape}")
 
-            # Reshape to [1, num_frames, 1280] for the processor
-            cnn_features = cnn_features.unsqueeze(0).to(self.model.device)
+            # Average over temporal dimension to get single feature vector per spatial location
+            # This matches the single <vision> token in the prompt
+            cnn_features = cnn_features.mean(dim=0, keepdim=True)  # [1, 1280]
 
-            # Expand dims to match expected format [B, L, 1, C] -> [B, L, H*W, C]
-            # The processor expects [B, L, H*W, C] where H*W is spatial resolution
-            # For features, we just use [B, L, 1, C]
-            cnn_features = cnn_features.unsqueeze(2)  # [1, num_frames, 1, 1280]
+            # Reshape to [1, 1, 1280] for the processor (batch, temporal, features)
+            cnn_features = cnn_features.unsqueeze(0).to(self.model.device)  # [1, 1, 1280]
+
+            # Expand dims to match expected format [B, L, H*W, C]
+            # For aggregated features, we use [B, 1, 1, C] (1 time step, 1 spatial location)
+            cnn_features = cnn_features.unsqueeze(2)  # [1, 1, 1, 1280]
 
             # Create features dict as expected by the model
             video_features = {
                 'feats': cnn_features,
-                'spatial_res': [1, 1]  # Single spatial location per frame
+                'spatial_res': [1, 1]  # Single spatial location
             }
 
             # Clear cache
