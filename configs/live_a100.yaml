@@ -1,0 +1,36 @@
+model:
+    llama2_7b_path: './Llama-2-7b-hf'
+    kwargs:
+        checkpoint_path: './ckpts_streamvlm/ckpts_streamvlm/state_dict.pth.tar'
+        strict_checkpoint: False
+        bf16: True  # Use bfloat16 for memory efficiency
+        xattn_config:
+            xattn_type: 'dotprod'
+            xattn_block_size: 1
+            adapter_insert_layers: "[6, 8, 10, 12, 14, 16, 18, 20, 22]"
+            num_of_xattn_heads: 1
+        trainable:
+            llm: False
+            xattn: False
+            vision: False
+        peft_config:
+            r: 32
+            lora_alpha: 16
+            lora_dropout: 0.05
+            target_modules:
+                - 'q_proj'
+                - 'v_proj'
+                - 'k_proj'
+                - 'lm_head'
+
+evaluator:
+    name: 'live_feedback_lightweight'
+    kwargs:
+        camera_id: 0
+        exercise_type: 'squats'
+    sampling_kwargs:
+        do_sample: False
+        temperature: 0.
+        max_feedback_length: 64  # Full length for better feedback quality
+        feats_frequency: 4  # Higher rate for smoother feedback (4 fps like original)
+        feedback_interval: 5.0  # Give feedback every 5 seconds
