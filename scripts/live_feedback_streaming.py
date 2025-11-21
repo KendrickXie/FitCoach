@@ -262,7 +262,7 @@ class StreamingFeedbackCoach:
                 # Decode feedback
                 feedback_text = self.model.tokenizer.decode(current_feedback_tokens, skip_special_tokens=True)
                 print(f" Done!")
-                print(f"💬 Coach: {feedback_text}")
+                print(f"Coach: {feedback_text}")
 
                 # Store feedback
                 self.feedback_history.append((time.time(), feedback_text))
