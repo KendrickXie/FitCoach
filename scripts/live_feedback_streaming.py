@@ -26,9 +26,14 @@ class StreamingFeedbackCoach:
 
     Key differences from lightweight version:
     - Model controls feedback timing (not fixed intervals)
-    - Continuous streaming generation
-    - Uses <next> token to continue watching
-    - Simulates real-time video streaming
+    - Streaming generation loop (model decides with tokens)
+    - Pre-extracts all features before generation (like original evaluation)
+    - Uses blind frame mechanism to simulate real-time
+
+    Note: "Streaming" refers to the generation approach (asynchronous token-based
+    decisions), not real-time feature extraction. All frames are preprocessed and
+    features extracted before the generation loop starts, matching the original
+    evaluation approach.
     """
 
     def __init__(self, model, config, cnn_weights_path, max_buffer_frames=300):
@@ -142,11 +147,29 @@ class StreamingFeedbackCoach:
         """Generate feedback with streaming approach - model decides timing.
 
         This mimics the original _generate_interactive method but for live video.
+        We pre-extract all CNN features first, then run the generation loop.
 
         Args:
             system_prompt: System prompt describing the task
             video_file: Optional video file path (None for webcam)
         """
+        min_frames = self.sampling_kwargs.get("min_frames_before_start", 12)
+
+        print("Waiting for initial frames before starting generation...")
+
+        # Wait for minimum frames
+        while len(self.frame_buffer) < min_frames:
+            time.sleep(0.1)
+
+        print(f"Starting generation with {len(self.frame_buffer)} frames buffered...")
+
+        # Pre-extract ALL CNN features from buffered frames
+        # This matches the original approach where all features are available upfront
+        all_frames = list(self.frame_buffer)
+        print(f"Extracting CNN features from {len(all_frames)} frames...")
+        encoded_video = self.extract_features_batch(all_frames)
+        print(f"Features extracted: {encoded_video['feats'].shape}")
+
         # Prepare input prompt
         input_prompt = system_prompt + VISION_TOKEN
         input_ids = self.model.tokenizer.encode(input_prompt)
@@ -157,55 +180,30 @@ class StreamingFeedbackCoach:
         output_ids = torch.tensor(input_ids).unsqueeze(0).to(self.model.device)
         vision_xattn_mask = torch.tensor(vision_xattn_mask).unsqueeze(0).to(self.model.device)
 
-        # Generation state
+        # Generation state (follows original _generate_interactive)
         past_key_values = None
         feedback_mode = False
         current_feedback_tokens = []
-        input_vision_idx = 1  # Start after initial <vision> token
-        skip_blind_frames = []  # Frames to skip during feedback generation
+        curr_response_len = 0
+        input_vision_idx = 2  # Start with first 2 frames as in original
+        skip_blind_frames = [False] * (input_vision_idx - 1)
 
         max_feedback_length = self.sampling_kwargs.get("max_feedback_length", 64)
         do_sample = self.sampling_kwargs.get("do_sample", False)
         temperature = self.sampling_kwargs.get("temperature", 0.0)
 
-        min_frames = self.sampling_kwargs.get("min_frames_before_start", 12)
-
-        print("Waiting for initial frames before starting generation...")
-
-        # Continue generating while we have frames
-        while True:
-            # Wait for enough frames to be available
-            while len(self.frame_buffer) < input_vision_idx + 1:
-                if len(self.frame_buffer) < min_frames and input_vision_idx == 1:
-                    time.sleep(0.1)  # Wait for initial frames
-                    continue
-                else:
-                    # No more frames available - end of stream
-                    break
-
-            if len(self.frame_buffer) < input_vision_idx + 1:
-                break  # End of video
-
-            # Extract features for frames the model needs to see
-            frames_to_process = list(self.frame_buffer)[1:input_vision_idx + 1]  # Skip first (before initial <vision>)
-
-            # Apply blind mask - skip frames received during feedback generation
-            if len(skip_blind_frames) > 0:
-                frames_to_process = [f for i, f in enumerate(frames_to_process) if not skip_blind_frames[i]]
-
-            if len(frames_to_process) == 0:
-                # No frames to process, generate next token with existing features
-                encoded_video = {
-                    'feats': torch.zeros(1, 0, 1, 1280).to(self.model.device),
-                    'spatial_res': [1, 1]
-                }
-            else:
-                # Extract CNN features from frames
-                encoded_video = self.extract_features_batch(frames_to_process)
+        # Continue generating until we've consumed all video frames
+        while input_vision_idx < encoded_video["feats"].shape[1]:
+            # Prepare video input (frames 1 to input_vision_idx, excluding blind frames)
+            encoded_video_feats = encoded_video["feats"]
+            encoded_video_in_range = {
+                "feats": encoded_video_feats[:, 1:input_vision_idx][:, np.logical_not(skip_blind_frames)],
+                "spatial_res": encoded_video["spatial_res"],
+            }
 
             # Adapt video features
             multi_model_embedding = self.model.model.adapter(
-                encoded_video, output_ids, vision_xattn_mask
+                encoded_video_in_range, output_ids, vision_xattn_mask
             )
 
             # Generate next token
@@ -227,13 +225,12 @@ class StreamingFeedbackCoach:
                 probs = torch.softmax(logits, dim=-1)
                 next_token = torch.multinomial(probs, num_samples=1).squeeze(-1)
 
-            # Sanity checks for invalid states
+            # Sanity checks for invalid states (from original)
             if feedback_mode:
-                # In feedback mode, only allow text tokens or end token
+                # In feedback mode, if invalid token or too long, force end
                 if (next_token.item() == self.special_tokens_dict[VISION_TOKEN] or
                     next_token.item() == self.special_tokens_dict[FEEDBACK_BEGIN_TOKEN] or
-                    len(current_feedback_tokens) >= max_feedback_length):
-                    # Force end of feedback
+                    curr_response_len > max_feedback_length):
                     next_token = torch.tensor([self.special_tokens_dict[FEEDBACK_END_TOKEN]]).to(self.model.device)
             else:
                 # Not in feedback mode - only allow <vision> or <answer> tokens
@@ -245,30 +242,18 @@ class StreamingFeedbackCoach:
             # Add token to output
             output_ids = torch.cat([output_ids, next_token.unsqueeze(-1)], dim=1)
 
-            # Handle state transitions based on generated token
+            # State changes based on output (from original)
             if next_token.item() == self.special_tokens_dict[VISION_TOKEN]:
                 # Continue watching - consume next frame
                 input_vision_idx += 1
-                if len(skip_blind_frames) > 0:
-                    skip_blind_frames.append(False)
-
-                # Update mask
-                vision_xattn_mask = torch.cat([
-                    vision_xattn_mask,
-                    torch.ones(1, 1).to(vision_xattn_mask) * 2
-                ], dim=1)
+                skip_blind_frames.append(False)
 
             elif next_token.item() == self.special_tokens_dict[FEEDBACK_BEGIN_TOKEN]:
                 # Start feedback mode
                 feedback_mode = True
+                curr_response_len = 0
                 current_feedback_tokens = []
-                print(f"\n[Frame {len(self.frame_buffer)}] Coach is speaking...", end="")
-
-                # Update mask
-                vision_xattn_mask = torch.cat([
-                    vision_xattn_mask,
-                    torch.zeros(1, 1).to(vision_xattn_mask)
-                ], dim=1)
+                print(f"\n[Frame {input_vision_idx}] Coach is speaking...", end="")
 
             elif next_token.item() == self.special_tokens_dict[FEEDBACK_END_TOKEN]:
                 # End feedback mode
@@ -283,27 +268,25 @@ class StreamingFeedbackCoach:
                 self.feedback_history.append((time.time(), feedback_text))
 
                 # Skip frames that arrived during generation (simulate real-time)
-                num_tokens_generated = len(current_feedback_tokens)
-                skip_forward = math.floor((num_tokens_generated / INFERENCE_SPEED) * self.feats_frequency)
+                skip_forward = math.floor((curr_response_len / INFERENCE_SPEED) * self.feats_frequency)
                 input_vision_idx += skip_forward
-
-                # Mark these frames as blind
-                skip_blind_frames = skip_blind_frames + [True] * skip_forward
-
+                skip_blind_frames += [True] * skip_forward
+                curr_response_len = 0
                 current_feedback_tokens = []
 
-                # Update mask
-                vision_xattn_mask = torch.cat([
-                    vision_xattn_mask,
-                    torch.zeros(1, 1).to(vision_xattn_mask)
-                ], dim=1)
-
             else:
-                # Regular token in feedback mode
+                # Regular text token in feedback mode
                 if feedback_mode:
                     current_feedback_tokens.append(next_token.item())
+                    curr_response_len += 1
 
-                # Update mask
+            # Update vision cross-attention mask based on token type
+            if next_token.item() == self.special_tokens_dict[VISION_TOKEN]:
+                vision_xattn_mask = torch.cat([
+                    vision_xattn_mask,
+                    torch.ones(1, 1).to(vision_xattn_mask) * 2
+                ], dim=1)
+            else:
                 vision_xattn_mask = torch.cat([
                     vision_xattn_mask,
                     torch.zeros(1, 1).to(vision_xattn_mask)
@@ -354,61 +337,41 @@ class StreamingFeedbackCoach:
         last_preprocess_time = time.time()
         frame_count = 0
 
-        # Start frame preprocessing loop in main thread
-        print("Starting frame preprocessing...")
+        # First, preprocess ALL frames from the video
+        print("Preprocessing all frames from video...")
 
-        import threading
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
 
-        # Flag to signal generation thread to stop
-        stop_generation = threading.Event()
+            frame_count += 1
+            current_time = time.time()
 
-        def preprocess_loop():
-            """Continuously preprocess frames and add to buffer."""
-            nonlocal frame_count, last_preprocess_time
+            # Preprocess at specified rate
+            if current_time - last_preprocess_time >= preprocess_interval:
+                try:
+                    preprocessed = self.preprocess_frame(frame)
+                    self.frame_buffer.append(preprocessed)
+                    last_preprocess_time = current_time
+                except Exception as e:
+                    print(f"Frame preprocessing error: {e}")
 
-            while not stop_generation.is_set():
-                ret, frame = cap.read()
-                if not ret:
-                    if video_file:
-                        print("\nEnd of video")
-                    stop_generation.set()
-                    break
+            # Delay for video playback timing
+            if video_file and frame_delay > 0:
+                time.sleep(frame_delay)
 
-                frame_count += 1
-                current_time = time.time()
+        print(f"Preprocessed {len(self.frame_buffer)} frames from {frame_count} total frames")
 
-                # Preprocess at specified rate
-                if current_time - last_preprocess_time >= preprocess_interval:
-                    try:
-                        preprocessed = self.preprocess_frame(frame)
-                        self.frame_buffer.append(preprocessed)
-                        last_preprocess_time = current_time
-                    except Exception as e:
-                        print(f"Frame preprocessing error: {e}")
-
-                # Display frame if not headless
-                if not headless:
-                    cv2.imshow("FitCoach Live", frame)
-                    if cv2.waitKey(1) & 0xFF == ord('q'):
-                        stop_generation.set()
-                        break
-
-                # Delay for video playback
-                if video_file and frame_delay > 0:
-                    time.sleep(frame_delay)
-
-        # Start preprocessing in separate thread
-        preprocess_thread = threading.Thread(target=preprocess_loop)
-        preprocess_thread.start()
-
-        # Run streaming generation in main thread
+        # Now run streaming generation with all frames available
         try:
             self.generate_streaming(system_prompt, video_file)
         except KeyboardInterrupt:
             print("\n\nStopping...")
-        finally:
-            stop_generation.set()
-            preprocess_thread.join()
+        except Exception as e:
+            print(f"\n\nError during generation: {e}")
+            import traceback
+            traceback.print_exc()
 
         # Cleanup
         cap.release()
@@ -418,6 +381,7 @@ class StreamingFeedbackCoach:
         # Print summary
         print(f"\n=== Session Summary ===")
         print(f"Total frames: {frame_count}")
+        print(f"Preprocessed frames: {len(self.frame_buffer)}")
         print(f"Total feedback: {len(self.feedback_history)}")
 
         if self.feedback_history:
